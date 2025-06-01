@@ -59,7 +59,7 @@ proc printHelp() =
   echo "                             none: don't replace numbers"
   echo ""
   echo "Example:"
-  echo "  excel_obfuscator --preserve-headers --string-replacement=consistent input.xlsx output.xlsx"
+  echo "  excel_obfuscator --preserve-headers --string-replacement=consistent input.xlsx output.csv"
 
 # Parse command-line arguments
 proc parseArgs(): tuple[options: ObfuscationOptions, inputFile, outputFile: string] =
@@ -138,189 +138,106 @@ proc parseArgs(): tuple[options: ObfuscationOptions, inputFile, outputFile: stri
 proc obfuscateExcel(inputFile, outputFile: string, options: ObfuscationOptions) =
   echo "Processing file: ", inputFile
   
-  # Load the Excel workbook
-  var wb = Workbook()
-  discard wb.load(inputFile)
+  # Load the Excel workbook using parseExcel
+  let sheetTable = parseExcel(inputFile)
   
-  # Create a new workbook for the obfuscated data
-  var obfuscatedWb = Workbook()
-  
-  # Used for consistent replacement
+  # Global replacement tables for consistent replacements
   var 
     stringReplacements = initTable[string, string]()
-    numberReplacements = initTable[float, float]()
+    numberReplacements = initTable[string, string]()
   
-  # Process each sheet
-  for sheetName in wb.getSheetNames():
-    echo "Processing sheet: ", sheetName
-    var sheet = wb.getSheet(sheetName)
+  # Determine output format based on file extension
+  let outputExt = splitFile(outputFile).ext.toLowerAscii()
+  let isCSVOutput = outputExt == ".csv"
+  
+  if isCSVOutput:
+    # For CSV output, we can only process one sheet
+    # Use the first sheet or let user specify
+    var targetSheetName = ""
+    for sheetName in sheetTable.data.keys:
+      targetSheetName = sheetName
+      break
     
-    # Get all non-empty cells
-    var 
-      allRows: seq[int] = @[]
-      allCols: seq[int] = @[]
-      maxRow = 0
-      maxCol = 0
+    if targetSheetName == "":
+      echo "No sheets found in the Excel file"
+      return
+      
+    echo "Processing sheet: ", targetSheetName, " (CSV output)"
+    let sheet = sheetTable[targetSheetName]
     
-    for row, col, cell in sheet.cells():
-      maxRow = max(maxRow, row)
-      maxCol = max(maxCol, col)
-      if row notin allRows:
-        allRows.add(row)
-      if col notin allCols:
-        allCols.add(col)
+    # Convert to sequence of sequences for easier manipulation
+    var data = sheet.toSeq()
     
-    # Sort the arrays
-    allRows.sort()
-    allCols.sort()
-    
-    # Prepare shuffling if required
-    var 
-      rowMap = newSeq[int](maxRow + 1)
-      colMap = newSeq[int](maxCol + 1)
-    
-    for i in 0..maxRow:
-      rowMap[i] = i
-    
-    for i in 0..maxCol:
-      colMap[i] = i
-    
-    # Shuffle rows if requested (but keep header if needed)
-    if options.shuffleRows:
-      var startIdx = if options.preserveHeaders: 1 else: 0
-      if startIdx < allRows.len:
-        var shuffleRows = allRows[startIdx..^1]
-        shuffle(shuffleRows)
-        for i in startIdx..<allRows.len:
-          rowMap[allRows[i]] = shuffleRows[i - startIdx]
+    # Shuffle rows if requested (preserve header if needed)
+    if options.shuffleRows and data.len > 0:
+      let startIdx = if options.preserveHeaders: 1 else: 0
+      if data.len > startIdx:
+        var rowsToShuffle = data[startIdx..^1]
+        shuffle(rowsToShuffle)
+        for i in startIdx..<data.len:
+          data[i] = rowsToShuffle[i - startIdx]
     
     # Shuffle columns if requested
-    if options.shuffleColumns:
-      var shuffleCols = allCols
-      shuffle(shuffleCols)
-      for i in 0..<allCols.len:
-        colMap[allCols[i]] = shuffleCols[i]
-    
-    # Create a new sheet in the obfuscated workbook
-    var obfuscatedSheet = obfuscatedWb.createSheet(sheetName)
-    
-    # Copy and obfuscate the data
-    for row, col, cell in sheet.cells():
-      let 
-        newRow = rowMap[row]
-        newCol = colMap[col]
+    if options.shuffleColumns and data.len > 0 and data[0].len > 0:
+      let numCols = data[0].len
+      var colIndices = toSeq(0..<numCols)
+      shuffle(colIndices)
       
-      # Determine if this is a header cell that should be preserved
-      let isHeader = (row == 0 and options.preserveHeaders)
-      
-      # Handle different cell types
-      if cell.kind == CellType.formula and options.preserveFormulas:
-        # Copy formula unchanged
-        obfuscatedSheet.setCellFormula(newRow, newCol, cell.formula)
-      else:
-        case cell.kind:
-          of CellType.empty:
-            # Skip empty cells
-            discard
-          of CellType.boolean:
-            # For boolean values, randomly flip or keep
-            if not isHeader:
-              let newValue = if rand(1) == 0: not cell.boolVal else: cell.boolVal
-              obfuscatedSheet.setCellBool(newRow, newCol, newValue)
-            else:
-              obfuscatedSheet.setCellBool(newRow, newCol, cell.boolVal)
-          
-          of CellType.numeric:
-            # For numeric values
-            if isHeader or options.numberReplacement == nrNone:
-              # Preserve original value
-              obfuscatedSheet.setCellFloat(newRow, newCol, cell.numVal)
-            else:
-              case options.numberReplacement:
-                of nrJitter:
-                  # Add jitter to the value
-                  obfuscatedSheet.setCellFloat(newRow, newCol, jitterNumber(cell.numVal))
-                of nrRandom:
-                  # Replace with random number (between 0 and twice the original)
-                  let newValue = rand(cell.numVal * 2.0)
-                  obfuscatedSheet.setCellFloat(newRow, newCol, newValue)
-                of nrConsistent:
-                  # Use consistent replacements
-                  if not numberReplacements.hasKey(cell.numVal):
-                    # First time seeing this value, create a replacement
-                    numberReplacements[cell.numVal] = rand(1000.0)
-                  obfuscatedSheet.setCellFloat(newRow, newCol, numberReplacements[cell.numVal])
-                of nrNone:
-                  # This case is handled above
-                  discard
-          
-          of CellType.string:
-            # For string values
-            if isHeader or options.stringReplacement == srNone:
-              # Preserve original value
-              obfuscatedSheet.setCellString(newRow, newCol, cell.strVal)
-            else:
-              case options.stringReplacement:
-                of srRandom:
-                  # Replace with random string of similar length
-                  let newLength = max(3, cell.strVal.len)
-                  obfuscatedSheet.setCellString(newRow, newCol, randomString(newLength))
-                of srConsistent:
-                  # Use consistent replacements
-                  if not stringReplacements.hasKey(cell.strVal):
-                    # First time seeing this value, create a replacement
-                    stringReplacements[cell.strVal] = randomString(max(3, cell.strVal.len))
-                  obfuscatedSheet.setCellString(newRow, newCol, stringReplacements[cell.strVal])
-                of srNone:
-                  # This case is handled above
-                  discard
-          
-          of CellType.date:
-            # For date values, add random days (±30 days)
-            if isHeader:
-              obfuscatedSheet.setCellFloat(newRow, newCol, cell.numVal)
-            else:
-              let jitter = rand(60) - 30 # Random between -30 and +30
-              obfuscatedSheet.setCellFloat(newRow, newCol, cell.numVal + jitter.float)
-              # Format as date
-              let dateFormat = obfuscatedWb.addFormat()
-              dateFormat.setNumberFormat("yyyy-mm-dd")
-              obfuscatedSheet.setCellFormat(newRow, newCol, dateFormat)
-          
-          of CellType.formula:
-            # Formula cells are handled above (with the preserveFormulas check)
-            # This branch handles the case where we don't preserve formulas
-            # In that case, we obfuscate the formula's result value
-            let formulaResult = cell.numVal
-            if not isHeader and options.numberReplacement != nrNone:
-              case options.numberReplacement:
-                of nrJitter:
-                  obfuscatedSheet.setCellFloat(newRow, newCol, jitterNumber(formulaResult))
-                of nrRandom:
-                  obfuscatedSheet.setCellFloat(newRow, newCol, rand(formulaResult * 2.0))
-                of nrConsistent:
-                  if not numberReplacements.hasKey(formulaResult):
-                    numberReplacements[formulaResult] = rand(1000.0)
-                  obfuscatedSheet.setCellFloat(newRow, newCol, numberReplacements[formulaResult])
-                of nrNone:
-                  # This case is handled by the outer condition
-                  discard
-            else:
-              obfuscatedSheet.setCellFloat(newRow, newCol, formulaResult)
+      for rowIdx in 0..<data.len:
+        let originalRow = data[rowIdx]
+        for colIdx in 0..<numCols:
+          data[rowIdx][colIdx] = originalRow[colIndices[colIdx]]
     
-    # Copy column widths (assuming the sheet provides this info)
-    for col in 0..maxCol:
-      let newCol = colMap[col]
-      try:
-        let width = sheet.getColWidth(col)
-        obfuscatedSheet.setColWidth(newCol, width)
-      except:
-        # If getColWidth is not available, just skip it
-        discard
-  
-  # Save the obfuscated workbook
-  obfuscatedWb.save(outputFile)
-  echo "Obfuscated Excel file saved to: ", outputFile
+    # Obfuscate the data
+    for rowIdx in 0..<data.len:
+      let isHeaderRow = (rowIdx == 0 and options.preserveHeaders)
+      
+      for colIdx in 0..<data[rowIdx].len:
+        if not isHeaderRow:
+          let cellValue = data[rowIdx][colIdx].strip()
+          
+          if cellValue != "":
+            # Try to parse as number
+            try:
+              let numValue = parseFloat(cellValue)
+              # It's a number
+              if not options.preserveNumbers:
+                case options.numberReplacement:
+                  of nrJitter:
+                    data[rowIdx][colIdx] = $jitterNumber(numValue)
+                  of nrRandom:
+                    data[rowIdx][colIdx] = $(rand(numValue * 2.0))
+                  of nrConsistent:
+                    if not numberReplacements.hasKey(cellValue):
+                      numberReplacements[cellValue] = $(rand(1000.0))
+                    data[rowIdx][colIdx] = numberReplacements[cellValue]
+                  of nrNone:
+                    discard # Keep original
+            except ValueError:
+              # It's a string
+              if options.stringReplacement != srNone:
+                case options.stringReplacement:
+                  of srRandom:
+                    let newLength = max(3, cellValue.len)
+                    data[rowIdx][colIdx] = randomString(newLength)
+                  of srConsistent:
+                    if not stringReplacements.hasKey(cellValue):
+                      stringReplacements[cellValue] = randomString(max(3, cellValue.len))
+                    data[rowIdx][colIdx] = stringReplacements[cellValue]
+                  of srNone:
+                    discard # Keep original
+    
+    # Write to CSV
+    let csvFile = open(outputFile, fmWrite)
+    for row in data:
+      csvFile.writeLine(row.join(","))
+    csvFile.close()
+    
+    echo "Obfuscated data saved to CSV: ", outputFile
+  else:
+    echo "Error: This tool can only output to CSV format (.csv extension required)"
+    echo "The xlsx library used doesn't support writing Excel files."
+    quit(1)
 
 proc main() =
   let args = parseArgs()

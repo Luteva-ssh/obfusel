@@ -6,6 +6,7 @@ description   = "An obfuscator for excel sheets. If you are not allowed to trans
 license       = "MIT"
 srcDir        = "src"
 bin           = @["obfusel"]
+binDir        = "bin"
 
 
 # Dependencies
