@@ -10,5 +10,5 @@ binDir        = "bin"
 
 
 # Dependencies
-requires "xlsx"
+requires "xl"
 requires "nim >= 1.6.0"
